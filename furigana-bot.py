@@ -3,6 +3,11 @@ from discord.ext import commands
 from discord.ui import View, Button
 import pykakasi
 import re
+from PIL import Image
+import pytesseract
+import io
+import aiohttp
+
 
 intents = discord.Intents.default()
 # Bot has read permission
@@ -10,6 +15,21 @@ intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 kks = pykakasi.kakasi()
+
+async def extract_text_from_attachments(attachments):
+    extracted_text = ""
+    for attachment in attachments:
+        if any(attachment.filename.lower().endswith(ext) for ext in ["png", "jpg", "jpeg", "bmp"]):
+            # Download the image
+            async with aiohttp.ClientSession() as session:
+                async with session.get(attachment.url) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        image = Image.open(io.BytesIO(data))
+                        # OCR met Japanse taal
+                        text = pytesseract.image_to_string(image, lang="jpn")
+                        extracted_text += text + "\n"
+    return extracted_text.strip()
 
 # Check if word has Kanji
 def contains_kanji(word):
@@ -68,21 +88,67 @@ class FuriganaView(View):
 # !furi command (slimme keuze: eigen bericht of citaat)
 @bot.command()
 async def furi(ctx, *, sentence: str = None):
-    # Als de gebruiker geen tekst meegeeft in !furi, probeer de eigen content te gebruiken
     text_to_use = sentence if sentence else ctx.message.content
     text_has_kanji = contains_kanji(text_to_use)
 
-    # Als er geen Japanse tekens in het bericht zitten en er is een reply
-    if not text_has_kanji and ctx.message.reference:
-        # Haal het geciteerde bericht
-        ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        text_to_use = ref_msg.content
-        text_has_kanji = contains_kanji(text_to_use)
+    furigana_items = []
 
-    # Nu heb je de juiste tekst (eigen bericht of citaat)
-    if text_has_kanji:
-        view = FuriganaView(text_to_use)
+    # Check attachment
+    if ctx.message.attachments:
+        attachments_text = await extract_text_from_attachments(ctx.message.attachments)
+        for att, text in zip(ctx.message.attachments, attachments_text.split('\n')):
+            if contains_kanji(text):
+                furigana_items.append((f"<attachment {att.filename}>", text))
+        # Use OCR text if no kanji in main message
+        if attachments_text:
+            for text in attachments_text.split('\n'):
+                if contains_kanji(text):
+                    text_to_use = text
+                    text_has_kanji = True
+                    break
+
+    # Only check quoted message if original message has no kanji
+    if not text_has_kanji and ctx.message.reference:
+        quote_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+        # Use quoted message content if it has kanji
+        if contains_kanji(quote_message.content):
+            text_to_use = quote_message.content
+            text_has_kanji = True
+        # Check for attachments in quoted message only if still no kanji
+        elif quote_message.attachments:
+            ref_attachments_text = await extract_text_from_attachments(quote_message.attachments)
+            for att, text in zip(quote_message.attachments, ref_attachments_text.split('\n')):
+                if contains_kanji(text):
+                    furigana_items.append((f"<attachment {att.filename}>", text))
+
+    # Add message itself if it contains kanji and is not empty
+    if text_has_kanji and text_to_use.strip():
+        furigana_items.insert(0, ("Message", text_to_use))
+
+    if furigana_items:
+        class FuriganaViewMulti(View):
+            def __init__(self, items):
+                super().__init__()
+                self.items = items
+
+            @discord.ui.button(label="インライン", style=discord.ButtonStyle.primary, custom_id="show_inline_furigana_multi")
+            async def show_inline_furigana(self, interaction: discord.Interaction, button: discord.ui.Button):
+                result = ""
+                for label, text in self.items:
+                    result += f"{label}: {get_inline_furigana(text)}\n"
+                await interaction.response.send_message(result.strip(), ephemeral=True)
+
+            @discord.ui.button(label="リスト", style=discord.ButtonStyle.secondary, custom_id="show_list_multi")
+            async def show_kanji_list(self, interaction: discord.Interaction, button: discord.ui.Button):
+                result = ""
+                for label, text in self.items:
+                    result += f"{label}:\n{get_kanji_list(text)}\n"
+                await interaction.response.send_message(result.strip(), ephemeral=True)
+
+        view = FuriganaViewMulti(furigana_items)
         await ctx.send(view=view)
+    else:
+        await ctx.send("Geen Japanse tekst gevonden.")
 
 # Read bot token from file
 with open("token.txt", "r") as f:
