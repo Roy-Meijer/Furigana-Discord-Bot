@@ -296,6 +296,6 @@ class FuriganaView(View):
                 parts.append(get_kanji_list(text))
         await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
 
-with open("token.txt", "r") as f:
+with open("../bot_token.txt", "r") as f:
     token = f.read().strip()
 bot.run(token)
