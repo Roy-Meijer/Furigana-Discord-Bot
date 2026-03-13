@@ -263,7 +263,7 @@ async def furi(ctx, *, sentence: str = None):
 
 class FuriganaView(View):
     def __init__(self, items):
-        super().__init__(timeout=600)
+        super().__init__(timeout=1209600)
         self.items   = items
         self.message = None
 
