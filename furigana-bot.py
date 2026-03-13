@@ -1,129 +1,207 @@
 import discord
 from discord.ext import commands
-from discord.ui import View, Button
+from discord.ui import View
 import pykakasi
 import re
-from PIL import Image
-import pytesseract
+import json
 import io
 import aiohttp
+from PIL import Image
+import pytesseract
 
+with open("kanji_emoji.json", "r", encoding="utf-8") as f:
+    KANJI_EMOJI = json.load(f)
 
 intents = discord.Intents.default()
-# Bot has read permission
-intents.message_content = True  
-bot = commands.Bot(command_prefix="!", intents=intents)
-
+intents.message_content = True
+bot = commands.Bot(command_prefix=["!", "\uff01"], intents=intents)
 kks = pykakasi.kakasi()
 
+# Pre-compiled regex patterns
+_RE_KANJI = re.compile(r'[\u4E00-\u9FBF]')
+_RE_DIGITS_BEFORE_KANJI = re.compile(r'(\d+)(?=[\u4E00-\u9FBF])')
+_RE_DIGITS = re.compile(r'\d+')
+_RE_HIRAGANA_ONLY = re.compile(r'[\u3040-\u309F]+$')
+_RE_KANJI_WORD = re.compile(r'\d*[\u4E00-\u9FBF]+')
+_RE_STRIP_DIGITS = re.compile(r'\d')
+_KANJI_MIN, _KANJI_MAX = 0x4E00, 0x9FBF
+
+def _is_kanji(ch):
+    return _KANJI_MIN <= ord(ch) <= _KANJI_MAX
+
+KANJI_DIGITS = ['一', '二', '三', '四', '五', '六', '七', '八', '九']
+
+def _sub_10000(n):
+    """Convert a number 0-9999 to kanji."""
+    parts = []
+    if n >= 1000:
+        t = n // 1000
+        parts.append(('' if t == 1 else KANJI_DIGITS[t - 1]) + '千')
+        n %= 1000
+    if n >= 100:
+        h = n // 100
+        parts.append(('' if h == 1 else KANJI_DIGITS[h - 1]) + '百')
+        n %= 100
+    if n >= 10:
+        t = n // 10
+        parts.append(('' if t == 1 else KANJI_DIGITS[t - 1]) + '十')
+        n %= 10
+    if n > 0:
+        parts.append(KANJI_DIGITS[n - 1])
+    return ''.join(parts)
+
+def arabic_to_kanji(n):
+    """Convert an Arabic number string to proper Japanese kanji (e.g. '10' -> '十', '300' -> '三百')"""
+    n = int(n)
+    if n == 0:
+        return '〇'
+    parts = []
+    if n >= 100000000:
+        top = n // 100000000
+        parts.append(_sub_10000(top) + '億')
+        n %= 100000000
+    if n >= 10000:
+        top = n // 10000
+        parts.append(_sub_10000(top) + '万')
+        n %= 10000
+    if n > 0:
+        parts.append(_sub_10000(n))
+    return ''.join(parts)
+
+def digits_to_kanji(text):
+    """Convert Arabic numbers to kanji when followed by kanji (e.g. '300匹' -> '三百匹')"""
+    return _RE_DIGITS_BEFORE_KANJI.sub(lambda m: arabic_to_kanji(m.group()), text)
+
+IMAGE_EXTENSIONS = ("png", "jpg", "jpeg", "bmp")
+
+def ocr_image(image):
+    return pytesseract.image_to_string(image, lang="jpn").strip()
+
 async def extract_text_from_attachments(attachments):
-    extracted_text = ""
-    for attachment in attachments:
-        if any(attachment.filename.lower().endswith(ext) for ext in ["png", "jpg", "jpeg", "bmp"]):
-            # Download the image
-            async with aiohttp.ClientSession() as session:
-                async with session.get(attachment.url) as resp:
-                    if resp.status == 200:
-                        data = await resp.read()
-                        image = Image.open(io.BytesIO(data))
-                        # OCR met Japanse taal
-                        text = pytesseract.image_to_string(image, lang="jpn")
-                        extracted_text += text + "\n"
-    return extracted_text.strip()
+    results = []
+    image_attachments = [a for a in attachments if a.filename.lower().endswith(IMAGE_EXTENSIONS)]
+    if not image_attachments:
+        return results
+    async with aiohttp.ClientSession() as session:
+        for attachment in image_attachments:
+            async with session.get(attachment.url) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    image = Image.open(io.BytesIO(data))
+                    text = ocr_image(image)
+                    results.append((attachment.filename, text.strip()))
+    return results
 
-# Check if word has Kanji
-def contains_kanji(word):
-    return re.search(r'[\u4E00-\u9FBF]', word)
+def contains_kanji(text):
+    return _RE_KANJI.search(text)
 
-# Generate Inline Furigana while preserving original text
+def has_furigana(text, index):
+    """Check if position is followed by (hiragana), returning end index or 0."""
+    if index < len(text) and text[index] == '(':
+        end = text.find(')', index)
+        if end != -1:
+            content = text[index + 1:end]
+            if content and _RE_HIRAGANA_ONLY.match(content):
+                return end + 1
+    return 0
+
 def get_inline_furigana(text):
-    result_text = ""
-    index = 0
-    while index < len(text):
-        char = text[index]
-        # check every character for kanji, if found, find the whole cluster and convert to hiragana
-        if contains_kanji(char):
-            start = index
-            while index < len(text) and contains_kanji(text[index]):
-                index += 1
-            kanji_word = text[start:index]
-            # convert to hiragana
-            hira = "".join([item['hira'] for item in kks.convert(kanji_word)])
-            result_text += f"{kanji_word}({hira})"
+    parts = []
+    i = 0
+    n = len(text)
+    while i < n:
+        digit_match = _RE_DIGITS.match(text, i)
+        if digit_match and digit_match.end() < n and _is_kanji(text[digit_match.end()]):
+            start = i
+            i = digit_match.end()
+            while i < n and _is_kanji(text[i]):
+                i += 1
+            skip_to = has_furigana(text, i)
+            if skip_to:
+                parts.append(text[start:skip_to])
+                i = skip_to
+            else:
+                word = text[start:i]
+                hira = "".join(item['hira'] for item in kks.convert(digits_to_kanji(word)))
+                parts.append(f"{word}({hira})")
+        elif _is_kanji(text[i]):
+            start = i
+            i += 1
+            while i < n and _is_kanji(text[i]):
+                i += 1
+            skip_to = has_furigana(text, i)
+            if skip_to:
+                parts.append(text[start:skip_to])
+                i = skip_to
+            else:
+                word = text[start:i]
+                hira = "".join(item['hira'] for item in kks.convert(word))
+                parts.append(f"{word}({hira})")
         else:
-            # keep original text
-            result_text += char
-            index += 1
-    return result_text
+            parts.append(text[i])
+            i += 1
+    return "".join(parts)
 
-# Generate Kanji List Furigana (Kanji = Furigana)
+def get_emoji_for_kanji(word):
+    """Look up emoji: try full word first, then individual characters."""
+    kanji_only = _RE_STRIP_DIGITS.sub('', word)
+    if kanji_only in KANJI_EMOJI:
+        return KANJI_EMOJI[kanji_only]
+    for char in kanji_only:
+        if char in KANJI_EMOJI:
+            return KANJI_EMOJI[char]
+    return ''
+
 def get_kanji_list(text):
-    kanji_words = re.findall(r'[\u4E00-\u9FBF]+', text)
+    converted = kks.convert(digits_to_kanji(text))
+    seen = set()
     result_list = []
-    for word in kanji_words:
-        hira = "".join([item['hira'] for item in kks.convert(word)])
-        result_list.append(f"{word} = {hira}")
+    for item in converted:
+        orig, hira = item['orig'], item['hira']
+        if not contains_kanji(orig):
+            continue
+        kanji_part = _RE_KANJI_WORD.search(orig)
+        if not kanji_part:
+            continue
+        kanji_word = kanji_part.group()
+        if kanji_word in seen:
+            continue
+        seen.add(kanji_word)
+        display_word, display_hira = orig, hira
+        for m in _RE_KANJI_WORD.finditer(text):
+            if digits_to_kanji(m.group()) == kanji_word or m.group() == kanji_word:
+                trailing = orig[kanji_part.end():]
+                display_word = m.group() + trailing
+                break
+        emoji = get_emoji_for_kanji(display_word)
+        suffix = f" {emoji}" if emoji else ""
+        result_list.append(f"{display_word} = {display_hira}{suffix}")
     return "\n".join(result_list)
 
-# Create a View with two buttons: Inline & List
-class FuriganaView(View):
-    def __init__(self, original_text):
-        super().__init__()
-        self.original_text = original_text
-
-    # Inline Furigana button
-    @discord.ui.button(label="インライン", style=discord.ButtonStyle.primary, custom_id="show_inline_furigana")
-    async def show_inline_furigana(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # send the inline furigana text as ephemeral (only visible to the clicker)
-        inline_text = get_inline_furigana(self.original_text)
-        await interaction.response.send_message(inline_text, ephemeral=True)
-
-    # List Furigana button
-    @discord.ui.button(label="リスト", style=discord.ButtonStyle.secondary, custom_id="show_list")
-    async def show_kanji_list(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # generate kanji list on demand (use original text)
-        kanji_list_text = get_kanji_list(self.original_text)
-        await interaction.response.send_message(kanji_list_text, ephemeral=True)
-
-# !furi command (slimme keuze: eigen bericht of citaat)
-@bot.command()
+@bot.command(aliases=["ふり", "フリ", "ふりがな", "フリガナ", "furigana"])
 async def furi(ctx, *, sentence: str = None):
-    text_to_use = sentence if sentence else ctx.message.content
-    text_has_kanji = contains_kanji(text_to_use)
-
     furigana_items = []
 
-    # Check attachment
+    text_to_use = sentence if sentence else ctx.message.content
+    if text_to_use and contains_kanji(text_to_use):
+        furigana_items.append((None, text_to_use))
+
     if ctx.message.attachments:
-        attachments_text = await extract_text_from_attachments(ctx.message.attachments)
-        for att, text in zip(ctx.message.attachments, attachments_text.split('\n')):
-            if contains_kanji(text):
-                furigana_items.append((f"<attachment {att.filename}>", text))
-        # Use OCR text if no kanji in main message
-        if attachments_text:
-            for text in attachments_text.split('\n'):
-                if contains_kanji(text):
-                    text_to_use = text
-                    text_has_kanji = True
-                    break
+        attachment_results = await extract_text_from_attachments(ctx.message.attachments)
+        for filename, text in attachment_results:
+            if text and contains_kanji(text):
+                furigana_items.append((f"📎 {filename}", text))
 
-    # Only check quoted message if original message has no kanji
-    if not text_has_kanji and ctx.message.reference:
+    # Fallback to quoted message if nothing found above
+    if not furigana_items and ctx.message.reference:
         quote_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        # Use quoted message content if it has kanji
-        if contains_kanji(quote_message.content):
-            text_to_use = quote_message.content
-            text_has_kanji = True
-        # Check for attachments in quoted message only if still no kanji
-        elif quote_message.attachments:
-            ref_attachments_text = await extract_text_from_attachments(quote_message.attachments)
-            for att, text in zip(quote_message.attachments, ref_attachments_text.split('\n')):
-                if contains_kanji(text):
-                    furigana_items.append((f"<attachment {att.filename}>", text))
-
-    # Add message itself if it contains kanji and is not empty
-    if text_has_kanji and text_to_use.strip():
-        furigana_items.insert(0, ("Message", text_to_use))
+        if quote_message.content and contains_kanji(quote_message.content):
+            furigana_items.append((None, quote_message.content))
+        if quote_message.attachments:
+            ref_attachment_results = await extract_text_from_attachments(quote_message.attachments)
+            for filename, text in ref_attachment_results:
+                if text and contains_kanji(text):
+                    furigana_items.append((f"📎 {filename} (引用)", text))
 
     if furigana_items:
         class FuriganaViewMulti(View):
@@ -131,28 +209,29 @@ async def furi(ctx, *, sentence: str = None):
                 super().__init__()
                 self.items = items
 
-            @discord.ui.button(label="インライン", style=discord.ButtonStyle.primary, custom_id="show_inline_furigana_multi")
+            @discord.ui.button(label="ふりがな付き", style=discord.ButtonStyle.primary, custom_id="show_inline_furigana_multi")
             async def show_inline_furigana(self, interaction: discord.Interaction, button: discord.ui.Button):
-                result = ""
+                parts = []
                 for label, text in self.items:
-                    result += f"{label}: {get_inline_furigana(text)}\n"
-                await interaction.response.send_message(result.strip(), ephemeral=True)
+                    if label:
+                        parts.append(f"**{label}**\n{get_inline_furigana(text)}")
+                    else:
+                        parts.append(get_inline_furigana(text))
+                await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
 
-            @discord.ui.button(label="リスト", style=discord.ButtonStyle.secondary, custom_id="show_list_multi")
+            @discord.ui.button(label="漢字リスト", style=discord.ButtonStyle.success, custom_id="show_list_multi")
             async def show_kanji_list(self, interaction: discord.Interaction, button: discord.ui.Button):
-                result = ""
+                parts = []
                 for label, text in self.items:
-                    result += f"{label}:\n{get_kanji_list(text)}\n"
-                await interaction.response.send_message(result.strip(), ephemeral=True)
+                    if label:
+                        parts.append(f"**{label}**\n{get_kanji_list(text)}")
+                    else:
+                        parts.append(get_kanji_list(text))
+                await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
 
         view = FuriganaViewMulti(furigana_items)
         await ctx.send(view=view)
-    else:
-        await ctx.send("Geen Japanse tekst gevonden.")
 
-# Read bot token from file
 with open("token.txt", "r") as f:
     token = f.read().strip()
-
-# Run the bot
 bot.run(token)
