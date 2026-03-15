@@ -29,6 +29,28 @@ intents.message_content = True
 bot                     = commands.Bot(command_prefix=["!", "\uff01"], intents=intents)
 kks                     = pykakasi.kakasi()
 
+# persistent store: message_id → items, so buttons survive bot restarts
+STORE_FILE      = "furigana_store.json"
+_furigana_store = {}
+
+def _load_store():
+    global _furigana_store
+    try:
+        with open(STORE_FILE, "r", encoding="utf-8") as f:
+            _furigana_store = {int(k): v for k, v in json.load(f).items()}
+        log.info("Loaded %d stored furigana items", len(_furigana_store))
+    except FileNotFoundError:
+        _furigana_store = {}
+
+def _save_store():
+    # keep only the latest 100000 entries to prevent unbounded growth
+    if len(_furigana_store) > 100000:
+        keys = sorted(_furigana_store)
+        for k in keys[:-100000]:
+            del _furigana_store[k]
+    with open(STORE_FILE, "w", encoding="utf-8") as f:
+        json.dump({str(k): v for k, v in _furigana_store.items()}, f, ensure_ascii=False)
+
 # regex patterns
 _RE_KANJI               = re.compile(r'[\u4E00-\u9FBF]')
 _RE_DIGITS_BEFORE_KANJI = re.compile(r'(\d+)(?=[\u4E00-\u9FBF])')
@@ -285,32 +307,29 @@ async def furi(ctx, *, sentence: str = None):
     # show buttons if we found any kanji text
     if furigana_items:
         log.info("Sending %d furigana item(s)", len(furigana_items))
-        view         = FuriganaView(furigana_items)
+        view         = FuriganaView()
         view.message = await ctx.send(view=view)
+        _furigana_store[view.message.id] = furigana_items
+        _save_store()
     else:
         log.debug("No kanji found, nothing to send")
 
 
 class FuriganaView(View):
-    def __init__(self, items):
-        super().__init__(timeout=1209600)
-        self.items   = items
-        self.message = None
-
-    async def on_timeout(self):
-        for button in self.children:
-            button.disabled = True
-            button.style    = discord.ButtonStyle.secondary
-        if self.message:
-            await self.message.edit(view=self)
+    def __init__(self):
+        super().__init__(timeout=None)
 
     # blue button for inline furigana
-    @discord.ui.button(label="ふりがな付き", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="ふりがな付き", style=discord.ButtonStyle.primary, custom_id="furigana_inline")
     async def show_inline_furigana(self, interaction: discord.Interaction, button: discord.ui.Button):
         log.info("Inline furigana button clicked by %s", interaction.user)
+        items = _furigana_store.get(interaction.message.id)
+        if not items:
+            await interaction.response.send_message("This data has expired. Reply to the original message with `!furi` to generate new buttons!", ephemeral=True)
+            return
         try:
             parts = []
-            for label, text in self.items:
+            for label, text in items:
                 if label:
                     parts.append(f"**{label}**\n{get_inline_furigana(text)}")
                 else:
@@ -320,12 +339,16 @@ class FuriganaView(View):
             log.error("Inline furigana failed", exc_info=True)
 
     # green button for kanji list
-    @discord.ui.button(label="漢字リスト", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="漢字リスト", style=discord.ButtonStyle.success, custom_id="furigana_list")
     async def show_kanji_list(self, interaction: discord.Interaction, button: discord.ui.Button):
         log.info("Kanji list button clicked by %s", interaction.user)
+        items = _furigana_store.get(interaction.message.id)
+        if not items:
+            await interaction.response.send_message("This data has expired. Reply to the original message with `!furi` to generate new buttons!", ephemeral=True)
+            return
         try:
             parts = []
-            for label, text in self.items:
+            for label, text in items:
                 if label:
                     parts.append(f"**{label}**\n{get_kanji_list(text)}")
                 else:
@@ -333,6 +356,13 @@ class FuriganaView(View):
             await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
         except Exception:
             log.error("Kanji list failed", exc_info=True)
+
+
+@bot.event
+async def on_ready():
+    _load_store()
+    bot.add_view(FuriganaView())
+    log.info("Bot ready, persistent view registered")
 
 with open("../bot_token.txt", "r") as f:
     token = f.read().strip()
