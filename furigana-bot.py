@@ -6,13 +6,23 @@ import pykakasi
 import re
 import json
 import io
+import logging
+from logging.handlers import RotatingFileHandler
 import aiohttp
 from PIL import Image
 import pytesseract
 
+# logging setup: 5MB per file, keep 3 backups (20MB max total)
+log = logging.getLogger("furigana-bot")
+log.setLevel(logging.DEBUG)
+_handler = RotatingFileHandler("furigana-bot.log", maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)-7s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+log.addHandler(_handler)
+
 # load kanji to emoji mapping
 with open("kanji_emoji.json", "r", encoding="utf-8") as f:
     KANJI_EMOJI = json.load(f)
+log.info("Loaded %d kanji emoji mappings", len(KANJI_EMOJI))
 
 intents                 = discord.Intents.default()
 intents.message_content = True
@@ -96,12 +106,16 @@ async def extract_text_from_attachments(attachments):
         return results
     async with aiohttp.ClientSession() as session:
         for attachment in image_attachments:
+            log.debug("Downloading image: %s", attachment.filename)
             async with session.get(attachment.url) as resp:
                 if resp.status == 200:
                     data = await resp.read()
                     image = Image.open(io.BytesIO(data))
                     text = ocr_image(image)
+                    log.debug("OCR result for %s: %d chars", attachment.filename, len(text))
                     results.append((attachment.filename, text.strip()))
+                else:
+                    log.error("Failed to download %s: HTTP %d", attachment.filename, resp.status)
     return results
 
 # checks if some text contains kanji
@@ -230,6 +244,7 @@ def get_kanji_list(text):
 # !furi command: check message text, attachments, then fallback to quoted message
 @bot.command(aliases=["ふり", "フリ", "ふりがな", "フリガナ", "furigana"])
 async def furi(ctx, *, sentence: str = None):
+    log.info("!furi from %s in #%s", ctx.author, ctx.channel)
     furigana_items = []
 
     # step 1: check the message text itself
@@ -257,8 +272,11 @@ async def furi(ctx, *, sentence: str = None):
 
     # show buttons if we found any kanji text
     if furigana_items:
+        log.info("Sending %d furigana item(s)", len(furigana_items))
         view         = FuriganaView(furigana_items)
         view.message = await ctx.send(view=view)
+    else:
+        log.debug("No kanji found, nothing to send")
 
 
 class FuriganaView(View):
@@ -277,25 +295,34 @@ class FuriganaView(View):
     # blue button for inline furigana
     @discord.ui.button(label="ふりがな付き", style=discord.ButtonStyle.primary)
     async def show_inline_furigana(self, interaction: discord.Interaction, button: discord.ui.Button):
-        parts = []
-        for label, text in self.items:
-            if label:
-                parts.append(f"**{label}**\n{get_inline_furigana(text)}")
-            else:
-                parts.append(get_inline_furigana(text))
-        await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
+        log.info("Inline furigana button clicked by %s", interaction.user)
+        try:
+            parts = []
+            for label, text in self.items:
+                if label:
+                    parts.append(f"**{label}**\n{get_inline_furigana(text)}")
+                else:
+                    parts.append(get_inline_furigana(text))
+            await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
+        except Exception:
+            log.error("Inline furigana failed", exc_info=True)
 
     # green button for kanji list
     @discord.ui.button(label="漢字リスト", style=discord.ButtonStyle.success)
     async def show_kanji_list(self, interaction: discord.Interaction, button: discord.ui.Button):
-        parts = []
-        for label, text in self.items:
-            if label:
-                parts.append(f"**{label}**\n{get_kanji_list(text)}")
-            else:
-                parts.append(get_kanji_list(text))
-        await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
+        log.info("Kanji list button clicked by %s", interaction.user)
+        try:
+            parts = []
+            for label, text in self.items:
+                if label:
+                    parts.append(f"**{label}**\n{get_kanji_list(text)}")
+                else:
+                    parts.append(get_kanji_list(text))
+            await interaction.response.send_message("\n\n".join(parts), ephemeral=True)
+        except Exception:
+            log.error("Kanji list failed", exc_info=True)
 
 with open("../bot_token.txt", "r") as f:
     token = f.read().strip()
+log.info("Starting bot")
 bot.run(token)
