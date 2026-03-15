@@ -97,8 +97,20 @@ def digits_to_kanji(text):
 
 # extract japanese text from image
 IMAGE_EXTENSIONS = ("png", "jpg", "jpeg", "bmp")
+_OCR_CONFIGS = [
+    ("jpn",      ""),        # horizontal auto
+    ("jpn_vert", "--psm 5"), # vertical block
+]
+_RE_JAPANESE = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FBF]')
 def ocr_image(image):
-    return pytesseract.image_to_string(image, lang="jpn").strip()
+    best_text, best_score = "", 0
+    for lang, config in _OCR_CONFIGS:
+        text  = pytesseract.image_to_string(image, lang=lang, config=config).strip()
+        score = len(_RE_JAPANESE.findall(text))
+        if score > best_score:
+            best_text, best_score = text, score
+    log.debug("Tesseract best: %d japanese chars", best_score)
+    return best_text
 async def extract_text_from_attachments(attachments):
     results = []
     image_attachments = [a for a in attachments if a.filename.lower().endswith(IMAGE_EXTENSIONS)]
