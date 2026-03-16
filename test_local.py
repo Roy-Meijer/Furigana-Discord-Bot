@@ -2,38 +2,8 @@
 Test the furigana bot logic locally without Discord.
 Run: python test_local.py
 """
-import pykakasi
-import re
-
-kks = pykakasi.kakasi()
-
-def contains_kanji(word):
-    return re.search(r'[\u4E00-\u9FBF]', word)
-
-def get_inline_furigana(text):
-    result_text = ""
-    index = 0
-    while index < len(text):
-        char = text[index]
-        if contains_kanji(char):
-            start = index
-            while index < len(text) and contains_kanji(text[index]):
-                index += 1
-            kanji_word = text[start:index]
-            hira = "".join([item['hira'] for item in kks.convert(kanji_word)])
-            result_text += f"{kanji_word}({hira})"
-        else:
-            result_text += char
-            index += 1
-    return result_text
-
-def get_kanji_list(text):
-    kanji_words = re.findall(r'[\u4E00-\u9FBF]+', text)
-    result_list = []
-    for word in kanji_words:
-        hira = "".join([item['hira'] for item in kks.convert(word)])
-        result_list.append(f"{word} = {hira}")
-    return "\n".join(result_list)
+from bot import converter
+from bot.converters import _RE_KANJI
 
 
 def simulate_furi_command(sentence=None, message_content="", attachments_texts=None,
@@ -50,24 +20,24 @@ def simulate_furi_command(sentence=None, message_content="", attachments_texts=N
 
     # Step 1: Check original message text
     text_to_use = sentence if sentence else message_content
-    if text_to_use and contains_kanji(text_to_use):
+    if text_to_use and _RE_KANJI.search(text_to_use):
         furigana_items.append(("メッセージ", text_to_use))
 
     # Step 2: Check original message attachments
     if attachments_texts:
         for filename, ocr_text in attachments_texts.items():
-            if ocr_text and contains_kanji(ocr_text):
+            if ocr_text and _RE_KANJI.search(ocr_text):
                 furigana_items.append((f"📎 {filename}", ocr_text))
 
     # Step 3: Only if nothing above had kanji, check quoted message
     if not furigana_items and (quoted_content or quoted_attachments_texts):
-        if quoted_content and contains_kanji(quoted_content):
-            furigana_items.append(("メッセージ (引用)", quoted_content))
+        if quoted_content and _RE_KANJI.search(quoted_content):
+            furigana_items.append(("メッセージ", quoted_content))
 
         if quoted_attachments_texts:
             for filename, ocr_text in quoted_attachments_texts.items():
-                if ocr_text and contains_kanji(ocr_text):
-                    furigana_items.append((f"📎 {filename} (引用)", ocr_text))
+                if ocr_text and _RE_KANJI.search(ocr_text):
+                    furigana_items.append((f"📎 {filename}", ocr_text))
 
     return furigana_items
 
@@ -80,12 +50,12 @@ def print_results(furigana_items):
     print("  -> インライン:")
     for label, text in furigana_items:
         print(f"     **{label}**")
-        print(f"     {get_inline_furigana(text)}")
+        print(f"     {converter.get_inline_furigana(text)}")
 
     print("  -> リスト:")
     for label, text in furigana_items:
         print(f"     **{label}**")
-        print(f"     {get_kanji_list(text)}")
+        print(f"     {converter.get_kanji_list(text)}")
     print()
 
 

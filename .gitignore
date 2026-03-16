@@ -1,0 +1,5 @@
+*.log
+__pycache__/
+data/furigana_store.json
+bot_token.txt
+allowed_users.txt
