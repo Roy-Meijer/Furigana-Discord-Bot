@@ -1,0 +1,11 @@
+# allowed_users.txt — who may use /emoji_add and /emoji_remove
+#
+# Copy this file to allowed_users.txt and fill in your IDs.
+# allowed_users.txt is gitignored so your IDs stay private.
+#
+# user:<id>   — grant access to a specific user
+# role:<id>   — grant access to everyone with that role
+
+# Example:
+# user:123456789012345678
+# role:987654321098765432
