@@ -275,44 +275,92 @@ def get_kanji_list(text):
         result_list.append(f"{display_word} = {display_reading}{suffix}")
     return "\n".join(result_list)
 
+# shared: collect furigana items from text, attachments, and optional reference message
+async def _collect_furigana_items(text=None, attachments=None, reference_message=None):
+    items = []
+    if text and contains_kanji(text):
+        items.append((None, text))
+    if attachments:
+        attachment_results = await extract_text_from_attachments(attachments)
+        for filename, t in attachment_results:
+            if t and contains_kanji(t):
+                items.append((f"📎 {filename}", t))
+    if not items and reference_message:
+        if reference_message.content and contains_kanji(reference_message.content):
+            items.append((None, reference_message.content))
+        if reference_message.attachments:
+            ref_results = await extract_text_from_attachments(reference_message.attachments)
+            for filename, t in ref_results:
+                if t and contains_kanji(t):
+                    items.append((f"📎 {filename} (引用)", t))
+    return items
+
+# shared: send furigana buttons and store data
+async def _send_furigana(send_func, furigana_items, content=None, file=None):
+    view = FuriganaView()
+    kwargs = {"view": view}
+    if content:
+        kwargs["content"] = content
+    if file:
+        kwargs["file"] = file
+    msg = await send_func(**kwargs)
+    _furigana_store[msg.id] = furigana_items
+    _save_store()
+
 # !furi command: check message text, attachments, then fallback to quoted message
 @bot.command(aliases=["ふり", "フリ", "ふりがな", "フリガナ", "furigana"])
 async def furi(ctx, *, sentence: str = None):
     log.info("!furi from %s in #%s", ctx.author, ctx.channel)
-    furigana_items = []
-
-    # step 1: check the message text itself
     text_to_use = sentence if sentence else ctx.message.content
-    if text_to_use and contains_kanji(text_to_use):
-        furigana_items.append((None, text_to_use))
-
-    # step 2: check attached images for japanese text (OCR)
-    if ctx.message.attachments:
-        attachment_results = await extract_text_from_attachments(ctx.message.attachments)
-        for filename, text in attachment_results:
-            if text and contains_kanji(text):
-                furigana_items.append((f"📎 {filename}", text))
-
-    # step 3: fallback to quoted/replied message if nothing found above
-    if not furigana_items and ctx.message.reference:
-        quote_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
-        if quote_message.content and contains_kanji(quote_message.content):
-            furigana_items.append((None, quote_message.content))
-        if quote_message.attachments:
-            ref_attachment_results = await extract_text_from_attachments(quote_message.attachments)
-            for filename, text in ref_attachment_results:
-                if text and contains_kanji(text):
-                    furigana_items.append((f"📎 {filename} (引用)", text))
-
-    # show buttons if we found any kanji text
+    ref_message = None
+    if ctx.message.reference:
+        ref_message = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+    furigana_items = await _collect_furigana_items(
+        text=text_to_use,
+        attachments=ctx.message.attachments or None,
+        reference_message=ref_message
+    )
     if furigana_items:
         log.info("Sending %d furigana item(s)", len(furigana_items))
-        view         = FuriganaView()
-        view.message = await ctx.send(view=view)
-        _furigana_store[view.message.id] = furigana_items
-        _save_store()
+        await _send_furigana(ctx.send, furigana_items)
     else:
         log.debug("No kanji found, nothing to send")
+
+# /furi slash command
+@bot.tree.command(name="furi", description="Add furigana readings to Japanese text")
+@discord.app_commands.describe(sentence="Japanese text to add furigana to", image="Image containing Japanese text (OCR)")
+async def slash_furi(interaction: discord.Interaction, sentence: str = None, image: discord.Attachment = None):
+    log.info("/furi from %s in #%s", interaction.user, interaction.channel)
+    await interaction.response.defer()
+    attachments = [image] if image else None
+    furigana_items = await _collect_furigana_items(text=sentence, attachments=attachments)
+    if furigana_items:
+        log.info("Sending %d furigana item(s)", len(furigana_items))
+        file = None
+        if image:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image.url) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        file = discord.File(io.BytesIO(data), filename=image.filename)
+        await _send_furigana(lambda **kw: interaction.followup.send(**kw, wait=True), furigana_items, content=sentence, file=file)
+    else:
+        await interaction.followup.send("No kanji found in the text.", ephemeral=True)
+
+# right-click message → Apps → get furigana
+@bot.tree.context_menu(name="get furigana")
+async def context_furi(interaction: discord.Interaction, message: discord.Message):
+    log.info("Context menu furi from %s on message %d", interaction.user, message.id)
+    await interaction.response.defer()
+    furigana_items = await _collect_furigana_items(
+        text=message.content,
+        attachments=message.attachments or None
+    )
+    if furigana_items:
+        log.info("Sending %d furigana item(s)", len(furigana_items))
+        await _send_furigana(lambda **kw: interaction.followup.send(**kw, wait=True), furigana_items)
+    else:
+        await interaction.followup.send("No kanji found in this message.", ephemeral=True)
 
 
 class FuriganaView(View):
@@ -362,7 +410,8 @@ class FuriganaView(View):
 async def on_ready():
     _load_store()
     bot.add_view(FuriganaView())
-    log.info("Bot ready, persistent view registered")
+    await bot.tree.sync()
+    log.info("Bot ready, persistent view registered, slash commands synced")
 
 with open("../bot_token.txt", "r") as f:
     token = f.read().strip()
