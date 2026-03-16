@@ -32,12 +32,12 @@ def simulate_furi_command(sentence=None, message_content="", attachments_texts=N
     # Step 3: Only if nothing above had kanji, check quoted message
     if not furigana_items and (quoted_content or quoted_attachments_texts):
         if quoted_content and _RE_KANJI.search(quoted_content):
-            furigana_items.append(("メッセージ (引用)", quoted_content))
+            furigana_items.append(("メッセージ", quoted_content))
 
         if quoted_attachments_texts:
             for filename, ocr_text in quoted_attachments_texts.items():
                 if ocr_text and _RE_KANJI.search(ocr_text):
-                    furigana_items.append((f"📎 {filename} (引用)", ocr_text))
+                    furigana_items.append((f"📎 {filename}", ocr_text))
 
     return furigana_items
 
