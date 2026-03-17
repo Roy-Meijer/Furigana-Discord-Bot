@@ -161,6 +161,9 @@ class FuriganaCog(commands.Cog):
     ) -> None:
         """Slash command version of !furi. Supports text input and/or image attachment."""
         self.bot.log.info("/furi from %s in #%s", interaction.user, interaction.channel)
+        if sentence is None and image is None:
+            await interaction.response.send_message("Use `/furi sentence ...` for text or `/furi image ...` for an image.", ephemeral=True)
+            return
         await interaction.response.defer()
         attachments    = [image] if image else None
         # get furigana
