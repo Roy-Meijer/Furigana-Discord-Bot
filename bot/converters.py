@@ -1,5 +1,7 @@
 from typing import Final
+import json
 import re
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Module-level regexes and utility functions
@@ -20,11 +22,15 @@ _KANJI_DIGITS: Final = ['一', '二', '三', '四', '五', '六', '七', '八', 
 # number kanji excluded from single-character emoji fallback
 _NUMBER_KANJI: Final = set('一二三四五六七八九十百千万億兆')
 
-# reading corrections for kanji when followed by specific text
-# {kanji_segment: {following_text: correct_reading}}
-_READING_CORRECTIONS: Final = {
-    '筋': {'トレ': 'きん'},
-}
+# load reading overrides from external file
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+with open(_DATA_DIR / "reading_overrides.json", "r", encoding="utf-8") as _f:
+    _overrides = json.load(_f)
+
+_WORD_READING_OVERRIDES: Final = _overrides.get("word_readings", {})
+_READING_CORRECTIONS: Final = _overrides.get("compound_readings", {})
+_PREFIX_CORRECTIONS: Final = _overrides.get("prefix_corrections", {})
+
 
 def _sub_10000(number: int) -> str:
     """Converts a number below 10000 into kanji numerals"""
@@ -179,6 +185,16 @@ class FuriganaConverter:
                         reading = correct_reading
                         break
 
+            # Fix reading based on preceding segment (e.g. 半+島 → とう)
+            if original in _PREFIX_CORRECTIONS and i > 0:
+                prev_orig = converted[i - 1]['orig']
+                if prev_orig in _PREFIX_CORRECTIONS[original]:
+                    reading = _PREFIX_CORRECTIONS[original][prev_orig]
+
+            # Apply direct word reading overrides
+            if original in _WORD_READING_OVERRIDES:
+                reading = _WORD_READING_OVERRIDES[original]
+
             # get kanji from the word
             kanji_part = _RE_KANJI_WORD.search(original)
             # ignore if this word has no kanji
@@ -314,6 +330,16 @@ class FuriganaConverter:
                         if next_orig.startswith(following):
                             hira = correct_reading
                             break
+
+                # Fix reading based on preceding segment (e.g. 半+島 → とう)
+                if orig in _PREFIX_CORRECTIONS and i > 0:
+                    prev_orig = segments[i - 1]['orig']
+                    if prev_orig in _PREFIX_CORRECTIONS[orig]:
+                        hira = _PREFIX_CORRECTIONS[orig][prev_orig]
+
+                # Apply direct word reading overrides
+                if orig in _WORD_READING_OVERRIDES:
+                    hira = _WORD_READING_OVERRIDES[orig]
 
                 reading_map[offset] = (seg_len, hira)
             offset += orig_seg_len
