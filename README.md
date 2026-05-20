@@ -30,14 +30,23 @@ furigana-bot-development/
 ## Features
 - Generates inline furigana or kanji lists from Japanese text or an image.  
 - Kanji list also tries to map an emoji for comprehensibility
-- **`!furi` / `/furi`** — Generate the inline furigana or kanji list
-  - Can also be used as the `get furigana` right click context menu on any message
+- **Prefix commands:**
+  - **`!furi`** — Generate furigana for text only (ignores image attachments)
+  - **`!furiimage`** / **`!furiimg`** — Generate furigana for images only (OCR)
+  - **`!furiall`** — Generate furigana for both text and images
+  - Reply with any command to process quoted message
+- **Slash command:** **`/furi`** — Generate furigana with text/image options
+- **Context menu (right-click a message):**
+  - **ふりがな テキスト / Get Furigana Text** — text only
+  - **ふりがな 画像 / Get Furigana Image** — images only
+  - **ふりがな / Get Furigana** — both text and images
 - **`/emoji_add`** — Add or update a kanji to emoji mapping (privileged)
   - Existing mappings are shown as autocomplete suggestions while typing
 - **`/emoji_remove`** — Remove an emoji mapping (privileged)
   - Existing mappings are shown as autocomplete suggestions while typing
 - Inline furigana format: `漢字||(かんじ)||`
 - Kanji list format: `漢字 = かんじ 📖`
+- Also works with ！(full-width) and aliases: `!furigana` `!ふりがな` `!フリガナ`
 
 ---
 
