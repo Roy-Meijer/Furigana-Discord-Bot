@@ -19,15 +19,27 @@ SendFunc = Callable[..., Awaitable[discord.Message]]
 class FuriganaCog(commands.Cog):
     def __init__(self, bot: FuriganaBot):
         self.bot = bot
-        # add conntext menu command
-        self._context_menu = app_commands.ContextMenu(
-            name="ふりがな / Get Furigana",
-            callback=self._context_furi,
+        # add context menu commands (text, image, all)
+        self._ctx_menu_text = app_commands.ContextMenu(
+            name="ふりがな テキスト / Get Furigana Text",
+            callback=self._context_furi_text,
         )
-        self.bot.tree.add_command(self._context_menu)
+        self._ctx_menu_image = app_commands.ContextMenu(
+            name="ふりがな 画像 / Get Furigana Image",
+            callback=self._context_furi_image,
+        )
+        self._ctx_menu_all = app_commands.ContextMenu(
+            name="ふりがな / Get Furigana",
+            callback=self._context_furi_all,
+        )
+        self.bot.tree.add_command(self._ctx_menu_text)
+        self.bot.tree.add_command(self._ctx_menu_image)
+        self.bot.tree.add_command(self._ctx_menu_all)
 
     async def cog_unload(self) -> None:
-        self.bot.tree.remove_command(self._context_menu.name, type=self._context_menu.type)
+        self.bot.tree.remove_command(self._ctx_menu_text.name, type=self._ctx_menu_text.type)
+        self.bot.tree.remove_command(self._ctx_menu_image.name, type=self._ctx_menu_image.type)
+        self.bot.tree.remove_command(self._ctx_menu_all.name, type=self._ctx_menu_all.type)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -64,6 +76,8 @@ class FuriganaCog(commands.Cog):
         text: str | None,
         attachments: Sequence[discord.Attachment] | None,
         reference_message: discord.Message | None = None,
+        include_text: bool = True,
+        include_images: bool = True,
     ) -> list[FuriganaItem]:
         """
         Returns a list of (label, text) tuples for each item we want to generate furigana for, in order of priority:
@@ -74,18 +88,18 @@ class FuriganaCog(commands.Cog):
         # list of tuples with (label, text) for each item we want to generate furigana for
         items = []
         # check the text itself
-        if text and _RE_KANJI.search(text):
+        if include_text and text and _RE_KANJI.search(text):
             items.append(("", text))
         # check attachments
-        if attachments:
+        if include_images and attachments:
             for filename, t in await extract_text_from_attachments(attachments):
                 if t and _RE_KANJI.search(t):
                     items.append((f"📎 {filename}", t))
         # if there is no kanji in the text or attachments, check the reference message
         if not items and reference_message:
-            if reference_message.content and _RE_KANJI.search(reference_message.content):
+            if include_text and reference_message.content and _RE_KANJI.search(reference_message.content):
                 items.append(("", reference_message.content))
-            if reference_message.attachments:
+            if include_images and reference_message.attachments:
                 for filename, t in await extract_text_from_attachments(reference_message.attachments):
                     if t and _RE_KANJI.search(t):
                         items.append((f"📎 {filename}", t))
@@ -120,14 +134,9 @@ class FuriganaCog(commands.Cog):
     # Prefix commands
     # ------------------------------------------------------------------
 
-    # Supports !furi, !furigana, !ふりがな, !フリガナ
-    @commands.command(aliases=["furigana", "ふりがな", "フリガナ"])
-    async def furi(self, ctx: commands.Context, *, sentence: str | None = None) -> None:
-        """
-        Main command to generate furigana for a given sentence or the message content if no sentence is provided.
-        Also checks attachments and quoted messages for kanji if the main text does not contain any.
-        """
-        self.bot.log.info("!furi from %s in #%s", ctx.author, ctx.channel)
+    async def _furi_prefix(self, ctx: commands.Context, sentence: str | None, include_text: bool = True, include_images: bool = True) -> None:
+        """Shared logic for all !furi prefix command variants."""
+        self.bot.log.info("!furi from %s in #%s (text=%s, images=%s)", ctx.author, ctx.channel, include_text, include_images)
         # get the message
         text_to_use = sentence if sentence else ctx.message.content
         ref_message = None
@@ -139,6 +148,8 @@ class FuriganaCog(commands.Cog):
             text=text_to_use,
             attachments=ctx.message.attachments or None,
             reference_message=ref_message,
+            include_text=include_text,
+            include_images=include_images,
         )
         # check if there are any items
         if furigana_items:
@@ -146,6 +157,24 @@ class FuriganaCog(commands.Cog):
             await self._send_furigana(ctx.send, furigana_items)
         else:
             self.bot.log.debug("No kanji found, nothing to send")
+
+    # Supports !furi, !furigana, !ふりがな, !フリガナ — text only (ignores images)
+    @commands.command(aliases=["furigana", "ふりがな", "フリガナ"])
+    async def furi(self, ctx: commands.Context, *, sentence: str | None = None) -> None:
+        """Generate furigana for text only (ignores image attachments)."""
+        await self._furi_prefix(ctx, sentence, include_text=True, include_images=False)
+
+    # Supports !furiimage, !furiimg — image only (ignores text)
+    @commands.command(aliases=["furiimg"])
+    async def furiimage(self, ctx: commands.Context) -> None:
+        """Generate furigana for image attachments only (ignores text)."""
+        await self._furi_prefix(ctx, None, include_text=False, include_images=True)
+
+    # Supports !furiall — both text and images
+    @commands.command()
+    async def furiall(self, ctx: commands.Context, *, sentence: str | None = None) -> None:
+        """Generate furigana for both text and image attachments."""
+        await self._furi_prefix(ctx, sentence, include_text=True, include_images=True)
 
     # ------------------------------------------------------------------
     # Slash commands
@@ -250,14 +279,16 @@ class FuriganaCog(commands.Cog):
     # Context menu
     # ------------------------------------------------------------------
 
-    async def _context_furi(self, interaction: discord.Interaction, message: discord.Message) -> None:
-        """Context menu command to generate furigana for a specific message."""
-        self.bot.log.info("Context menu furi from %s on message %d", interaction.user, message.id)
+    async def _context_furi_handler(self, interaction: discord.Interaction, message: discord.Message, include_text: bool = True, include_images: bool = True) -> None:
+        """Shared handler for context menu furigana commands."""
+        self.bot.log.info("Context menu furi from %s on message %d (text=%s, images=%s)", interaction.user, message.id, include_text, include_images)
         await interaction.response.defer()
-        # get all furigana items from selected message
+        # get furigana items from selected message
         furigana_items = await self._collect_furigana_items(
             text=message.content,
             attachments=message.attachments or None,
+            include_text=include_text,
+            include_images=include_images,
         )
         # check if there are any items
         if furigana_items:
@@ -270,6 +301,18 @@ class FuriganaCog(commands.Cog):
             # send feedback
             await interaction.followup.send("No kanji found in this message.", ephemeral=True)
             self.bot.log.debug("No kanji found in the message, nothing to send")
+
+    async def _context_furi_text(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        """Context menu: furigana for text only."""
+        await self._context_furi_handler(interaction, message, include_text=True, include_images=False)
+
+    async def _context_furi_image(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        """Context menu: furigana for images only."""
+        await self._context_furi_handler(interaction, message, include_text=False, include_images=True)
+
+    async def _context_furi_all(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        """Context menu: furigana for both text and images."""
+        await self._context_furi_handler(interaction, message, include_text=True, include_images=True)
 
     # ------------------------------------------------------------------
     # Events

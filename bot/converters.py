@@ -17,6 +17,14 @@ _KANJI_MIN   : Final = 0x4E00
 _KANJI_MAX   : Final = 0x9FBF
 _KANJI_DIGITS: Final = ['一', '二', '三', '四', '五', '六', '七', '八', '九']
 
+# number kanji excluded from single-character emoji fallback
+_NUMBER_KANJI: Final = set('一二三四五六七八九十百千万億兆')
+
+# reading corrections for kanji when followed by specific text
+# {kanji_segment: {following_text: correct_reading}}
+_READING_CORRECTIONS: Final = {
+    '筋': {'トレ': 'きん'},
+}
 
 def _sub_10000(number: int) -> str:
     """Converts a number below 10000 into kanji numerals"""
@@ -144,9 +152,33 @@ class FuriganaConverter:
         result_list = []
 
         # loop all words
-        for item in converted:
+        for i, item in enumerate(converted):
             # get the word and the hiragana version
             original, reading = item['orig'], item['hira']
+
+            # Fix pykakasi misparsing 何ですか as 何で(なんで) + すか
+            if original == '何で' and reading == 'なんで' and i + 1 < len(converted):
+                next_orig = converted[i + 1]['orig']
+                if next_orig.startswith('す') or next_orig.startswith('しょ'):
+                    original = '何'
+                    reading = 'なん'
+
+            # Fix pykakasi misparsing verb+そう (hearsay) as one segment
+            elif original.endswith('そ') and reading.endswith('そ') and len(original) > 1:
+                trimmed = original[:-1]
+                if '\u3040' <= trimmed[-1] <= '\u309F':
+                    if i + 1 < len(converted) and converted[i + 1]['orig'].startswith('う'):
+                        original = trimmed
+                        reading = reading[:-1]
+
+            # Fix reading for kanji+katakana compounds (e.g. 筋トレ → きんトレ)
+            if original in _READING_CORRECTIONS and i + 1 < len(converted):
+                next_orig = converted[i + 1]['orig']
+                for following, correct_reading in _READING_CORRECTIONS[original].items():
+                    if next_orig.startswith(following):
+                        reading = correct_reading
+                        break
+
             # get kanji from the word
             kanji_part = _RE_KANJI_WORD.search(original)
             # ignore if this word has no kanji
@@ -162,11 +194,18 @@ class FuriganaConverter:
             display_word = original
             # try to find the original word text
             for match in _RE_KANJI_WORD.finditer(text):
+                converted_match = digits_to_kanji(match.group())
                 # check if the kanji part matches and the surrounding digits match
-                if digits_to_kanji(match.group()) == kanji_word or match.group() == kanji_word:
+                if converted_match == kanji_word or match.group() == kanji_word:
                     # if the kanji part is preceded by digits, include them in the display word
                     trailing = original[kanji_part.end():]
                     display_word = match.group() + trailing
+                    break
+                # handle case where pykakasi split number from counter (e.g. 二百 from ２００円)
+                elif converted_match.startswith(kanji_word) and len(kanji_word) < len(converted_match):
+                    # extract just the digit portion from the original match
+                    kanji_suffix_len = len(converted_match) - len(kanji_word)
+                    display_word = match.group()[:-kanji_suffix_len]
                     break
 
             # look up emoji for this kanji word
@@ -222,8 +261,9 @@ class FuriganaConverter:
             return best_match
 
         # if no word match was found, try matching individual kanji characters
+        # (skip number kanji to avoid misleading fallbacks like 一昨日 → 1️⃣)
         for ch in kanji_only:
-            if ch in self._kanji_emoji:
+            if ch in self._kanji_emoji and ch not in _NUMBER_KANJI:
                 return self._kanji_emoji[ch]
         return ''
 
@@ -240,13 +280,43 @@ class FuriganaConverter:
         # map each kanji segment start position to its length and reading
         reading_map: dict[int, tuple[int, str]] = {}
         offset = 0
-        for segment in segments:
+        for i, segment in enumerate(segments):
             # the length of the original segment in the input text
-            seg_len = len(segment['orig'])
+            orig_seg_len = len(segment['orig'])
             # if this segment contains kanji, add it to the reading map
             if _RE_KANJI.search(segment['orig']):
-                reading_map[offset] = (seg_len, segment['hira'])
-            offset += seg_len
+                orig = segment['orig']
+                hira = segment['hira']
+                seg_len = orig_seg_len
+
+                # Fix pykakasi misparsing 何ですか as 何で(なんで) + すか
+                if orig == '何で' and hira == 'なんで' and i + 1 < len(segments):
+                    next_orig = segments[i + 1]['orig']
+                    if next_orig.startswith('す') or next_orig.startswith('しょ'):
+                        seg_len = 1
+                        hira = 'なん'
+
+                # Fix pykakasi misparsing verb+そう (hearsay) as one segment
+                # e.g. 違うそう → 違うそ(ちがうそ) + うです → should be 違う(ちがう)
+                elif orig.endswith('そ') and hira.endswith('そ') and len(orig) > 1:
+                    trimmed = orig[:-1]
+                    # only fix if trimmed word ends in hiragana (verb/adj ending)
+                    # this avoids false positives on volitional forms like 探そう
+                    if '\u3040' <= trimmed[-1] <= '\u309F':
+                        if i + 1 < len(segments) and segments[i + 1]['orig'].startswith('う'):
+                            seg_len = len(trimmed)
+                            hira = hira[:-1]
+
+                # Fix reading for kanji+katakana compounds (e.g. 筋トレ → きんトレ)
+                if orig in _READING_CORRECTIONS and i + 1 < len(segments):
+                    next_orig = segments[i + 1]['orig']
+                    for following, correct_reading in _READING_CORRECTIONS[orig].items():
+                        if next_orig.startswith(following):
+                            hira = correct_reading
+                            break
+
+                reading_map[offset] = (seg_len, hira)
+            offset += orig_seg_len
 
         parts: list[str] = []
         pos = 0
@@ -263,7 +333,12 @@ class FuriganaConverter:
 
                 # combine digits before kanji into a single reading like 3年 -> 三年
                 if parts and _RE_DIGITS.fullmatch(parts[-1]):
-                    digit_part = parts.pop()
+                    # collect all consecutive trailing digit parts
+                    digit_chars = []
+                    while parts and _RE_DIGITS.fullmatch(parts[-1]):
+                        digit_chars.append(parts.pop())
+                    digit_chars.reverse()
+                    digit_part = ''.join(digit_chars)
                     combined_display = digit_part + word
                     combined_kanji = digits_to_kanji(combined_display)
                     # get the reading for the combined kanji word
